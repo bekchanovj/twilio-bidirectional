@@ -1,4 +1,5 @@
 const PlayHT = require("playht");
+const axios = require('axios');
 const WebSocket = require("ws");
 const express = require("express");
 const WaveFile = require("wavefile").WaveFile;
@@ -16,7 +17,10 @@ const wss = new WebSocket.Server({ server });
 const OPENAI_API_KEY = '';
 const PLAYHT_USER_ID = '';
 const PLAYHT_API_KEY = '';
-const ASSEBLYAI_API_KEY = '';
+const ASSEMBLYAI_API_KEY = '';
+const TEST_SYSTEM_MESSAGE = "Your name is a Linda from HopOn. Act like you are a manager from HopOn - a transportation scheduler service. Ask user for the pickup location, date-time, dropoff location and the number of people. Wait for the user reply for each of those" + 
+" You already have a tool to calculate the total amout for the trip(quote), use it whenever possible(i.e. you know the pickup and dropoff location and the exact date with time). After getting the quote give user all of the options with the total amounts in US dollars. " + 
+"Act like you are a human, you can make funny jokes and also recomend the use some places to visit at the drop off location. Be concise you are on a phone call with the user. Whenever addreses are provided try to confirm them, it is crucial for them to be a real places."
 const SYSTEM_MESSAGE = "OBJECTIVES" +
 	"1. You are a human in the middle of a conversation that you need to continue following a script. Continue the conversations by following the [script] and don’t deviate. You can also generate new material based on what the prospect says, just make sure you MUST say the script as well." +
 	"2. Follow all policies for the conversation" +
@@ -95,9 +99,9 @@ const SYSTEM_MESSAGE = "OBJECTIVES" +
 	"*Wait For Prospect To Respond*" +
 	"~ \"Alright, let me just confirm. You're looking for a ride from {pickup location} on {pickup date and time}, heading to {drop off location}, and there will be {number of passengers} of you. Is that right? Or did I miss the memo?\"" +
 	"*Wait For Prospect To Respond*" +
-	"~ \"Fantastic! Let me do some quick math and get you a quote. Don't worry, I won't use my fingers.\"" +
+	"~ \"Fantastic! Do you want me to do some quick math and get you a quote? Don't worry, I won't use my fingers.\"" +
 	"*Wait For Prospect To Respond*" +
-	"~ \"The total price for your trip will be {quote} . Are you okay with this price? If yes, we'll roll out the red carpet. If not, we can always haggle.\"" +
+	"~ \"The total price for your trip will be {totalAmount} . Are you okay with this price? If yes, we'll roll out the red carpet. If not, we can always haggle.\"" +
 	"*Wait For Prospect To Respond*" +
 	"~ \"Great! I'll go ahead and book your transportation. You can count on us for a reliable, comfortable ride that will show up on time. We're like the mailman, just way cooler. I hope you have an awesome rest of your day!”" +
 	"END SCRIPT /" +
@@ -138,7 +142,7 @@ const streamingOptions = {
 wss.on('connection', async (ws) => {
   console.log('Twilio media stream WebSocket connected')
   const transcriber = new RealtimeTranscriber({
-    apiKey: ASSEBLYAI_API_KEY,
+    apiKey: ASSEMBLYAI_API_KEY,
     // Twilio media stream sends audio in mulaw format
     encoding: 'pcm_mulaw',
     // Twilio media stream sends audio at 8000 sample rate
@@ -147,7 +151,11 @@ wss.on('connection', async (ws) => {
     disablePartialTranscripts: true,
   })
   const transcriberConnectionPromise = transcriber.connect();
-  const conversation = [];
+  const messages = [{
+    role: "system",
+    content: TEST_SYSTEM_MESSAGE,
+  },
+  ];
   transcriber.on('transcript.partial', (partialTranscript) => {
     // Don't print anything when there's silence
     if (!partialTranscript.text) return;
@@ -155,35 +163,26 @@ wss.on('connection', async (ws) => {
   });
   transcriber.on('transcript.final', async (finalTranscript) => {
     console.log(finalTranscript.text);
-    conversation.push(`user: ${finalTranscript.text}`);
-    const aiResponse = await generateAIResponse(conversation.join(";"));
-    
-    const textStream = new PassThrough();
-    const chunks = [];
+    messages.push({ role: "user", content: finalTranscript.text})
+    const aiResponse = await createChatCompletion(messages);
 
-    (async () => {
-      for await (const part of aiResponse) {
-        // Add only the text to the stream
-        textStream.push(part.choices[0]?.delta?.content || '');
-        chunks.push(Buffer.from(part.choices[0]?.delta?.content || ''));
-      }
-      textStream.push(null);
-    })();
-    const textToSpeechStream = await PlayHT.stream(textStream, streamingOptions);
-    textToSpeechStream.on('data', (data) => {
-      const playMessage = JSON.stringify({
-        event: 'media',
-        streamSid,
-        media: {
-          payload: data.toString('base64'),
-        },
+    messages.push({ role: "assistant", content: aiResponse.choices[0].message.content})
+    console.log(messages);
+
+    if (aiResponse.choices[0].message.content) {
+      const textToSpeechStream = await PlayHT.stream(aiResponse.choices[0].message.content, streamingOptions);
+      textToSpeechStream.on('data', (data) => {
+        const message = JSON.stringify({
+          event: 'media',
+          streamSid,
+          media: {
+            payload: data.toString('base64'),
+          },
+        });
+
+        ws.send(message);
       });
-      assistantMessage = Buffer.concat(chunks).toString("utf-8");
-      conversation.push(`assistant: ${assistantMessage}`);
-      console.log();
-      ws.send(playMessage);
-
-    });
+    }
   });
 
 
@@ -236,39 +235,42 @@ app.post("/", async (req, res) => {
   );
 });
 
-// Function to generate the AI response based on the conversation history
-async function generateAIResponse(conversation) {
-  const messages = formatConversation(conversation);
-  return await createChatCompletion(messages);
-}
-
-// Function to format the conversation history into a format that the OpenAI API can understand
-function formatConversation(conversation) {
-  let isAI = true;
-  
-  const messages = [{
-          role: "system",
-          content: SYSTEM_MESSAGE,
-      },
-      {
-          role: "user",
-          content: "The text is being streamed to you. If you think my message is getting cut off repond an empty string, but BE CAREFUL when deciding",
-      },
-  ];
-
-  // Iterate through the conversation history and alternate between 'assistant' and 'user' roles
-  for (const message of conversation.split(";")) {
-      const role = isAI ? "assistant" : "user";
-      messages.push({
-          role: role,
-          content: message,
-      });
-      isAI = !isAI;
-  }
-  return messages;
-}
-
 async function createChatCompletion(messages) {
+  const tools = [
+    {
+      type: "function",
+      function: {
+        name: "generate_quote",
+        description: "Get the quote (total price) to travel from pick up location to the drop off location with different transportation options",
+        parameters: {
+          type: "object",
+          properties: {
+            serviceId: {
+              type: "number",
+              description: "The id of the service, defalult to 14",
+            },
+            pickUp: {
+              type: "string",
+              description: "The adress of the pickup location, e.g. 298 32nd Ave, San Francisco, CA",
+            },
+            pickUpDate: {
+              type: "string",
+              description: "The date and time for the pickup, e.g. 2024-03-05T15:30:00Z;j. The year is always equals to 2024, pickUpDate always ends with Z letter",
+            },
+            dropOff: {
+              type: "string",
+              description: "The dropoff location, e.g. 274 Lemon Grove, Irvine, CA",
+            },
+            groupSize: {
+              type: "number",
+              description: "The size of the group for the transportation, e.g. 50",
+            },
+          },
+          required: ["pickup"],
+        },
+      },
+    },
+  ];
   const chatCompletion = await openai.chat.completions.create({
     model: "gpt-4o",
     messages: messages,
@@ -276,10 +278,160 @@ async function createChatCompletion(messages) {
     max_tokens: 100, //You can adjust this number to control the length of the generated responses. Keep in mind that setting max_tokens too low might result in responses that are cut off and don't make sense.
     // top_p: 0.9, Set the top_p value to around 0.9 to keep the generated responses focused on the most probable tokens without completely eliminating creativity. Adjust the value based on the desired level of exploration.
     // n: 1, Specifies the number of completions you want the model to generate. Generating multiple completions will increase the time it takes to receive the responses.
-    stream: true,
+    stream: false,
+    tools: tools,
+    tool_choice: 'auto',
   });
 
+  const chatCompletionMessage = chatCompletion.choices[0].message;
+
+  // Check if the model wanted to call a function
+  const toolCalls = chatCompletionMessage.tool_calls;
+
+  console.log('chat complition: ')
+  console.log(chatCompletion)
+  console.log(chatCompletionMessage.tool_calls)
+  if (chatCompletionMessage.tool_calls) {
+    // Step 3: call the function
+    // Note: the JSON response may not always be valid; be sure to handle errors
+    const availableFunctions = {
+      generate_quote: generateQuote,
+    }; // only one function in this example, but you can have multiple
+    messages.push(chatCompletionMessage); // extend conversation with assistant's reply
+    for (const toolCall of toolCalls) {
+      const functionName = toolCall.function.name;
+      const functionToCall = availableFunctions[functionName];
+      const functionArgs = JSON.parse(toolCall.function.arguments);
+      const functionResponse = await functionToCall(
+        14, functionArgs.pickUp, functionArgs.pickUpDate, functionArgs.dropOff, functionArgs.groupSize
+      );
+      console.log('Function Response:');
+      console.log(functionResponse);
+      messages.push({
+        tool_call_id: toolCall.id,
+        role: "tool",
+        name: functionName,
+        content: functionResponse,
+      }); // extend conversation with function response
+    }
+    await sleep(30000);
+    const secondChatComplition =  await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: messages,
+      temperature: 0.8, // Controls the randomness of the generated responses. Higher values (e.g., 1.0) make the output more random and creative, while lower values (e.g., 0.2) make it more focused and deterministic. You can adjust the temperature based on your desired level of creativity and exploration.
+      max_tokens: 100, //You can adjust this number to control the length of the generated responses. Keep in mind that setting max_tokens too low might result in responses that are cut off and don't make sense.
+      // top_p: 0.9, Set the top_p value to around 0.9 to keep the generated responses focused on the most probable tokens without completely eliminating creativity. Adjust the value based on the desired level of exploration.
+      // n: 1, Specifies the number of completions you want the model to generate. Generating multiple completions will increase the time it takes to receive the responses.
+      stream: false,
+      tools: tools,
+      tool_choice: 'auto',
+    });; // get a new response from the model where it can see the function response
+
+    return secondChatComplition;
+  }
+
   return chatCompletion;
+}
+
+
+// Example dummy function hard coded to return the same quote
+function testGenerateQuote(serviceId, pickUp, pickUpDate, dropOff, groupSize) {
+
+  return JSON.stringify({
+    bundleId: "35ae2cb2-dc44-4a9b-a8fe-24dd437a6816",
+    options: [
+      {
+        id: "92fd898c-7e08-45d4-adea-684e052aad3a",
+        vehicles: "24pax Mini Coach",
+        totalPrice: 219420,
+        totalAmount: "$2,194.20 + miscellaneous fees"
+      },
+      {
+        id: "1d0acdd8-9d05-49b5-acc6-992b8b8672b4",
+        vehicles: "27pax Mini Coach",
+        totalPrice: 235673.33333333334,
+        totalAmount: "$2,356.73 + miscellaneous fees"
+      },
+      {
+        id: "f17a6992-d972-4e89-986c-50a871d6374a",
+        vehicles: "26pax Party Bus",
+        totalPrice: 414460,
+        totalAmount: "$4,144.60 + miscellaneous fees"
+      },
+      {
+        id: "c55b4a54-ff62-485b-919e-15b3f85d2c64",
+        vehicles: "10pax Mercedes-Benz Party Sprinter + 13pax Mercedes-Benz Party Sprinter",
+        totalPrice: 503853.3333333334,
+        totalAmount: "$5,038.53 + miscellaneous fees"
+      }
+    ],
+    pickUp: "298 32nd Ave, San Francisco, CA 94121, USA",
+    dropOff: "274 Lemon Grove, Irvine, CA 92618, USA",
+    pickUpDate: "July 1, 2024 at 3:30 PM",
+    estimatedDropOffDate: "Sunday February 25, 2024 at 10:30 AM",
+    stops: [],
+    passengers: 20,
+    totalDuration: "14 hours 8 minutes",
+    totalDistance: "858 miles",
+    garageBeforePickUp: "1818 Gilbreth Road Burlingame, CA 94010",
+    driverLeavesFromGarageAt: "Sunday February 25, 2024 at 2:41 PM",
+    driverDrivesBackToGarageAt: "Monday February 26, 2024 at 5:04 AM",
+    createdDate: "Thursday February 15, 2024 at 2:51 PM"
+  });
+}
+
+// Generate quote with through our api
+async function generateQuote(serviceId, pickUp, pickUpDate, dropOff, groupSize) {
+
+  const url = 'https://d759-54-85-196-140.ngrok-free.app/api/trip/engine/v1/quotes';
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'uhN8S2kN721duLAkyOc83gp2SUKi9fED34F2DVo8jyeQf6ZeQ0Q4kAwXOEGYzlAM',
+  };
+
+  // POST request with data
+  const postData = {
+    serviceId: serviceId,
+    pickUp: pickUp,
+    pickUpDate: pickUpDate,
+    dropOff: dropOff,
+    groupSize: groupSize,
+  };
+
+  await axios.post(url, postData, { headers })
+    .then(response => {
+      console.log('generateQuote Response:', response);
+      return response;
+    })
+    .catch(error => {
+      console.error('generateQuote Error:', error.message);
+    });
+}
+
+// Generate quote with through our api
+function getServiceId(serviceId, pickUp, pickUpDate, dropOff, groupSize) {
+
+  const url = 'https://d759-54-85-196-140.ngrok-free.app/api/trip/engine/v1/companies/services';
+  const headers = {
+    'Authorization': 'uhN8S2kN721duLAkyOc83gp2SUKi9fED34F2DVo8jyeQf6ZeQ0Q4kAwXOEGYzlAM',
+  };
+
+  // Basic GET request
+  axios.get(url, { headers })
+    .then(response => {
+      console.log('getServiceId Response:', response.data);
+      return JSON.parse(response.data).serviceId;
+    })
+    .catch(error => {
+      console.error('getServiceId Error:', error.message);
+    });
+
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 // Start server
