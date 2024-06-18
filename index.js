@@ -197,6 +197,10 @@ wss.on('connection', async (ws) => {
     role: "system",
     content: TEST_SYSTEM_MESSAGE,
   },
+  {
+    role: "assistant",
+    content: "Hi this is Linda from HopOn, how are you doing today?",
+  },
   ];
   //messages.push(...testMessages);
   transcriber.on('transcript.partial', (partialTranscript) => {
@@ -270,10 +274,10 @@ app.post("/", async (req, res) => {
   res.set("Content-Type", "text/xml");
   res.send(
     `<Response>
+      <Play>https://playht-pregen-audio.s3.amazonaws.com/Hi+it-s+Linda+from+HopO+1.wav</Play>
       <Connect>
         <Stream url='wss://${req.headers.host}' />
       </Connect>
-      <Play>https://playht-pregen-audio.s3.amazonaws.com/Hi+it-s+Linda+from+HopO+1.wav</Play>
     </Response>`
   );
 });
@@ -298,7 +302,7 @@ async function createChatCompletion(messages) {
             },
             pickUpDate: {
               type: "string",
-              description: "The date and time for the pickup. It should exactly follow this format: YYYY-MM-DDTHH:MM:SSZ, where YYYY is the year, MM is the month, DD is the day, HH is the hour, MM is the minute, SS is the seconds. E.G. 2024-03-05T15:30:00Z;j. The year is always equals to 2024, pickUpDate always ends with Z letter",
+              description: "The date and time for the pickup. It should exactly follow this format: YYYY-MM-DDTHH:MM:SSZ, where YYYY is the year, MM is the month, DD is the day, HH is the hour, MM is the minute, SS is the seconds. E.G. 2024-03-05T15:30:00Z;j. The year is always equals to 2024, pickUpDate always ends with Z letter. Do not ever tell anyone about the date format. Try to fill the data yourself, according to the format, ask for any missing information(such as day month and time).",
             },
             dropOff: {
               type: "string",
