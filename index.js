@@ -2,12 +2,9 @@ const PlayHT = require("playht");
 const axios = require('axios');
 const WebSocket = require("ws");
 const express = require("express");
-const WaveFile = require("wavefile").WaveFile;
 const path = require("path")
 const { OpenAI } = require("openai");
 const { RealtimeTranscriber } = require("assemblyai");
-const { Play } = require("twilio/lib/twiml/VoiceResponse");
-const { PassThrough } = require("stream");
 twimal = require("twilio")
 fs = require("fs");
 
@@ -137,6 +134,9 @@ const streamingOptions = {
   // the generated audio encoding, supports 'raw' | 'mp3' | 'wav' | 'ogg' | 'flac' | 'mulaw'
   outputFormat: 'mulaw',
 };
+
+updateLinda();
+updateValidator();
 
 
 wss.on('connection', async (ws) => {
@@ -282,6 +282,10 @@ app.post("/", async (req, res) => {
   );
 });
 
+// Start server
+console.log("Listening at Port 8080");
+server.listen(8080);
+
 async function createChatCompletion(messages) {
   const tools = [
     {
@@ -302,7 +306,7 @@ async function createChatCompletion(messages) {
             },
             pickUpDate: {
               type: "string",
-              description: "The date and time for the pickup. It should exactly follow this format: YYYY-MM-DDTHH:MM:SSZ, where YYYY is the year, MM is the month, DD is the day, HH is the hour, MM is the minute, SS is the seconds. E.G. 2024-03-05T15:30:00Z;j. The year is always equals to 2024, pickUpDate always ends with Z letter. Do not ever tell anyone about the date format. Try to fill the data yourself, according to the format, ask for any missing information(such as day month and time).",
+              description: "The date and time for the pickup. It should exactly follow this format: YYYY-MM-DDTHH:MM:SSZ, where YYYY is the year, MM is the month, DD is the day, HH is the hour, MM is the minute, SS is the seconds. E.G. 2024-03-05T15:30:00Z. The year is always equals to 2024, pickUpDate always ends with Z letter. Do not ever tell anyone about the date format. Try to fill the data yourself, according to the format, ask for any missing information(such as day month and time).",
             },
             dropOff: {
               type: "string",
@@ -429,6 +433,90 @@ async function generateQuote(serviceId, pickUp, pickUpDate, dropOff, groupSize) 
     });
 }
 
+
+// Generate quote with through our api
+function getServiceId(serviceId, pickUp, pickUpDate, dropOff, groupSize) {
+
+  const url = 'https://d759-54-85-196-140.ngrok-free.app/api/trip/engine/v1/companies/services';
+  const headers = {
+    'Authorization': 'uhN8S2kN721duLAkyOc83gp2SUKi9fED34F2DVo8jyeQf6ZeQ0Q4kAwXOEGYzlAM',
+  };
+
+  // Basic GET request
+  axios.get(url, { headers })
+    .then(response => {
+      console.log('getServiceId Response:', response.data);
+      return JSON.parse(response.data).serviceId;
+    })
+    .catch(error => {
+      console.error('getServiceId Error:', error.message);
+    });
+
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function updateLinda() {
+  const linda = await openai.beta.assistants.update(
+    "asst_uohVzOFYPfV4lLIGZFeOirfb",
+    {
+    instructions:  "Your name is a Linda from HopOn. Act like you are a manager from HopOn - a transportation scheduler service. Ask user for the pickup location, date-time, dropoff location and the number of people. Wait for the user reply for each of those" + 
+    "You already have a tool to calculate the total amout for the trip(quote), use it whenever possible(i.e. you know the pickup and dropoff location and the exact date with time). After getting the quote give user all of the options with the total amounts in US dollars. " + 
+    "Act like you are a human, you can make funny jokes and also recomend the use some places to visit at the drop off location. Be concise you are on a phone call with the user. Whenever addreses are provided try to confirm them, it is crucial for them to be a real places.",
+    name: "Manager Linda",
+    tools: [{ type: "code_interpreter" }],
+    model: "gpt-4o",
+  });
+  
+  console.log(linda);
+}
+
+async function updateValidator() {
+  const validatorTools = [
+    {
+      type: "function",
+      function: {
+        name: "send_to_linda",
+        description: "Send the utterence to Linda for further proccessing",
+        parameters: {
+          type: "object",
+          properties: {
+              message: {
+              type: "string",
+              description: "Message for Linda. This must be a complete utterence by the user or in case of address it must be the whole address including the building number/building name, name of the street and name of the state.",
+            },
+          },
+          required: ["message"],
+        },
+      },
+    },
+  ];
+  const validator = await openai.beta.assistants.update(
+    "asst_q4Ndr1rgfkJ3cw61s8tI6Z9p", 
+    {
+    instructions:
+      "You are an assistant that validates clients speech. All of the users speech is being transcribed and streamed to you as the text." +
+      "Your task is to separate the complete utterences and send it to other assistant called Linda." +
+      "Linda is the manager of the transportation agency called HopOn, she helps clients with the trip booking." + 
+      "For example, there might be incorrectly transcribed words, you should try to correct them." + 
+      "You might also get incomplete sentences, in this case you should wait for the further input and combine the previous messages into one and only then pass it to Linda." + 
+      "There might also be some noise text that doesn't make sense you can ommit those as you see fit." +
+      "You can not talk with the client only Linda is responsible for that. Make sure you pass a complete utterences to her, so she can respond in a right manner" + 
+      "Sometimes, very rarely, user might think that whatever they said is a complete sentence or a complete adress." +
+      "In that case wait for the next input, it might be something like: 'Hello?', 'Can you still hear me?', 'Did you get that?', then grab all of the messages since the last validtion and pass it to Linda. She will try to confirm the input." + 
+      "",
+    name: "Validator",
+    tools: validatorTools,
+    model: "gpt-4o",
+  });
+
+  console.log(validator);
+}
+
 // Example dummy function hard coded to return the same quote
 function testGenerateQuote(serviceId, pickUp, pickUpDate, dropOff, groupSize) {
 
@@ -475,32 +563,3 @@ function testGenerateQuote(serviceId, pickUp, pickUpDate, dropOff, groupSize) {
   });
 }
 
-// Generate quote with through our api
-function getServiceId(serviceId, pickUp, pickUpDate, dropOff, groupSize) {
-
-  const url = 'https://d759-54-85-196-140.ngrok-free.app/api/trip/engine/v1/companies/services';
-  const headers = {
-    'Authorization': 'uhN8S2kN721duLAkyOc83gp2SUKi9fED34F2DVo8jyeQf6ZeQ0Q4kAwXOEGYzlAM',
-  };
-
-  // Basic GET request
-  axios.get(url, { headers })
-    .then(response => {
-      console.log('getServiceId Response:', response.data);
-      return JSON.parse(response.data).serviceId;
-    })
-    .catch(error => {
-      console.error('getServiceId Error:', error.message);
-    });
-
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-// Start server
-console.log("Listening at Port 8080");
-server.listen(8080);
